@@ -29,7 +29,7 @@ use crate::error::{ProtoError, ProtoErrorKind, ProtoResult};
 use crate::rr::domain::label::{CaseInsensitive, CaseSensitive, IntoLabel, Label, LabelCmp};
 use crate::rr::domain::usage::LOCALHOST as LOCALHOST_usage;
 use crate::serialize::binary::{
-    BinDecodable, BinDecoder, BinEncodable, BinEncoder, DecodeError, Restrict,
+    BinDecodable, BinDecoder, BinEncodable, BinEncoder, DecodeError, NameEncoding, Restrict,
 };
 
 /// A domain name
@@ -665,90 +665,6 @@ impl Name {
         Ok(name)
     }
 
-    /// Emits the canonical version of the name to the encoder.
-    ///
-    /// In canonical form, there will be no pointers written to the encoder (i.e. no compression).
-    pub fn emit_as_canonical(
-        &self,
-        encoder: &mut BinEncoder<'_>,
-        canonical: bool,
-    ) -> ProtoResult<()> {
-        let buf_len = encoder.len(); // lazily assert the size is less than 255...
-        // lookup the label in the BinEncoder
-        // if it exists, write the Pointer
-        let labels = self.iter();
-
-        // start index of each label
-        let mut labels_written = Vec::with_capacity(self.label_ends.len());
-        // we're going to write out each label, tracking the indexes of the start to each label
-        //   then we'll look to see if we can remove them and recapture the capacity in the buffer...
-        for label in labels {
-            if label.len() > 63 {
-                return Err(ProtoErrorKind::LabelBytesTooLong(label.len()).into());
-            }
-
-            labels_written.push(encoder.offset());
-            encoder.emit_character_data(label)?;
-        }
-        let last_index = encoder.offset();
-        // now search for other labels already stored matching from the beginning label, strip then to the end
-        //   if it's not found, then store this as a new label
-        for label_idx in &labels_written {
-            match encoder.get_label_pointer(*label_idx, last_index) {
-                // if writing canonical and already found, continue
-                Some(_) if canonical => continue,
-                Some(loc) if !canonical && loc & 0xC000 == 0 => {
-                    // reset back to the beginning of this label, and then write the pointer...
-                    encoder.set_offset(*label_idx);
-                    encoder.trim();
-
-                    // write out the pointer marker
-                    //  or'd with the location which is less than 2^14
-                    encoder.emit_u16(0xC000u16 | loc)?;
-
-                    // we found a pointer don't write more, break
-                    return Ok(());
-                }
-                _ => {
-                    // no existing label exists, store this new one.
-                    encoder.store_label_pointer(*label_idx, last_index);
-                }
-            }
-        }
-
-        // if we're getting here, then we didn't write out a pointer and are ending the name
-        // the end of the list of names
-        encoder.emit(0)?;
-
-        // the entire name needs to be less than 256.
-        let length = encoder.len() - buf_len;
-        if length > 255 {
-            return Err(ProtoErrorKind::DomainNameTooLong(length).into());
-        }
-
-        Ok(())
-    }
-
-    /// Writes the labels, as lower case, to the encoder
-    ///
-    /// # Arguments
-    ///
-    /// * `encoder` - encoder for writing this name
-    /// * `lowercase` - if true the name will be lowercased, otherwise it will not be changed when writing
-    pub fn emit_with_lowercase(
-        &self,
-        encoder: &mut BinEncoder<'_>,
-        lowercase: bool,
-    ) -> ProtoResult<()> {
-        let is_canonical_names = encoder.is_canonical_names();
-        if lowercase {
-            self.to_lowercase()
-                .emit_as_canonical(encoder, is_canonical_names)
-        } else {
-            self.emit_as_canonical(encoder, is_canonical_names)
-        }
-    }
-
     /// compares with the other label, ignoring case
     fn cmp_with_f<F: LabelCmp>(&self, other: &Self) -> Ordering {
         match (self.is_fqdn(), other.is_fqdn()) {
@@ -1240,10 +1156,85 @@ enum ParseState {
 
 impl BinEncodable for Name {
     fn emit(&self, encoder: &mut BinEncoder<'_>) -> ProtoResult<()> {
-        let is_canonical_names = encoder.is_canonical_names();
-        self.emit_as_canonical(encoder, is_canonical_names)
+        let name;
+        let name_ref = if matches!(encoder.name_encoding(), NameEncoding::UncompressedLowercase) {
+            name = self.to_lowercase();
+            &name
+        } else {
+            self
+        };
+        let compression = matches!(encoder.name_encoding(), NameEncoding::Compressed)
+            && encoder.compressed_name_count < COMPRESSED_NAME_LIMIT;
+
+        let buf_len = encoder.len(); // lazily assert the size is less than 255...
+        // lookup the label in the BinEncoder
+        // if it exists, write the Pointer
+        let labels = name_ref.iter();
+
+        // start index of each label
+        let mut labels_written = Vec::with_capacity(name_ref.label_ends.len());
+        // we're going to write out each label, tracking the indexes of the start to each label
+        //   then we'll look to see if we can remove them and recapture the capacity in the buffer...
+        for label in labels {
+            if label.len() > 63 {
+                return Err(ProtoErrorKind::LabelBytesTooLong(label.len()).into());
+            }
+
+            labels_written.push(encoder.offset());
+            encoder.emit_character_data(label)?;
+        }
+        let last_index = encoder.offset();
+        // now search for other labels already stored matching from the beginning label, strip then to the end
+        //   if it's not found, then store this as a new label
+        if compression {
+            encoder.compressed_name_count += 1;
+            for label_idx in &labels_written {
+                match encoder.get_label_pointer(*label_idx, last_index) {
+                    Some(loc) if loc & 0xC000 == 0 => {
+                        // reset back to the beginning of this label, and then write the pointer...
+                        encoder.set_offset(*label_idx);
+                        encoder.trim();
+
+                        // write out the pointer marker
+                        //  or'd with the location which is less than 2^14
+                        encoder.emit_u16(0xC000u16 | loc)?;
+
+                        // we found a pointer don't write more, break
+                        return Ok(());
+                    }
+                    _ => {
+                        // no existing label exists, store this new one.
+                        encoder.store_label_pointer(*label_idx, last_index);
+                    }
+                }
+            }
+        } else {
+            // Compression is disabled for either this name or the entire message. Just attempt to
+            // store the label pointers, in case they'll be used by an eligible RData type later.
+            for label_idx in &labels_written {
+                encoder.store_label_pointer(*label_idx, last_index);
+            }
+        }
+
+        // if we're getting here, then we didn't write out a pointer and are ending the name
+        // the end of the list of names
+        encoder.emit(0)?;
+
+        // the entire name needs to be less than 256.
+        let length = encoder.len() - buf_len;
+        if length > 255 {
+            return Err(ProtoErrorKind::DomainNameTooLong(length).into());
+        }
+
+        Ok(())
     }
 }
+
+/// Maximum number of names for which name compression will be attempted per message.
+///
+/// This limit matches that from Unbound, see
+/// <https://nlnetlabs.nl/downloads/unbound/patch_CVE-2024-8508.diff>.
+const COMPRESSED_NAME_LIMIT: usize = 120;
 
 impl<'r> BinDecodable<'r> for Name {
     /// parses the chain of labels
