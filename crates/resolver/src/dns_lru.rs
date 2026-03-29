@@ -12,7 +12,9 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use moka::{Expiry, sync::Cache};
+use parking_lot::Mutex;
+mod lru;
+use lru::LruCache;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer};
 
@@ -84,7 +86,7 @@ impl LruValue {
 /// in the `moka` library.
 #[derive(Clone, Debug)]
 pub struct DnsLru {
-    cache: Cache<Query, LruValue>,
+    cache: Arc<Mutex<LruCache<Query, LruValue>>>,
     ttl_config: Arc<TtlConfig>,
 }
 
@@ -253,10 +255,7 @@ impl DnsLru {
     /// * `capacity` - size in number of cached queries
     /// * `ttl_config` - minimum and maximum TTLs for cached records
     pub fn new(capacity: usize, ttl_config: TtlConfig) -> Self {
-        let cache = Cache::builder()
-            .max_capacity(capacity.try_into().unwrap_or(u64::MAX))
-            .expire_after(LruValueExpiry)
-            .build();
+        let cache = Arc::new(Mutex::new(LruCache::new(capacity)));
         Self {
             cache,
             ttl_config: Arc::new(ttl_config),
@@ -264,7 +263,7 @@ impl DnsLru {
     }
 
     pub(crate) fn clear(&self) {
-        self.cache.invalidate_all();
+        self.cache.lock().clear();
     }
 
     pub(crate) fn insert(
@@ -297,7 +296,7 @@ impl DnsLru {
 
         // insert into the LRU
         let lookup = Lookup::new_with_deadline(query.clone(), Arc::from(records), valid_until);
-        self.cache.insert(
+        self.cache.lock().insert(
             query,
             LruValue {
                 lookup: Ok(lookup.clone()),
@@ -399,7 +398,7 @@ impl DnsLru {
         let ttl = Duration::from_secs(u64::from(ttl));
         let valid_until = now + ttl;
 
-        self.cache.insert(
+        self.cache.lock().insert(
             query,
             LruValue {
                 lookup: Ok(lookup.clone()),
@@ -444,7 +443,7 @@ impl DnsLru {
             {
                 let error = error.clone();
 
-                self.cache.insert(
+                self.cache.lock().insert(
                     query,
                     LruValue {
                         lookup: Err(error),
@@ -461,10 +460,15 @@ impl DnsLru {
 
     /// Based on the query, see if there are any records available
     pub fn get(&self, query: &Query, now: Instant) -> Option<Result<Lookup, ProtoError>> {
-        let value = self.cache.get(query)?;
-        if !value.is_current(now) {
-            return None;
-        }
+        let value = {
+            let mut cache = self.cache.lock();
+            let value = cache.get_mut(query)?.clone();
+            if !value.is_current(now) {
+                cache.remove(query);
+                return None;
+            }
+            value
+        };
         let mut result = value.with_updated_ttl(now).lookup;
         if let Err(err) = &mut result {
             Self::nx_error_with_ttl(err, value.ttl(now));
@@ -488,29 +492,6 @@ where
 
 #[cfg(feature = "serde")]
 mod ttl_config_deserialize;
-
-struct LruValueExpiry;
-
-impl Expiry<Query, LruValue> for LruValueExpiry {
-    fn expire_after_create(
-        &self,
-        _key: &Query,
-        value: &LruValue,
-        created_at: Instant,
-    ) -> Option<Duration> {
-        Some(value.ttl(created_at))
-    }
-
-    fn expire_after_update(
-        &self,
-        _key: &Query,
-        value: &LruValue,
-        updated_at: Instant,
-        _duration_until_expiry: Option<Duration>,
-    ) -> Option<Duration> {
-        Some(value.ttl(updated_at))
-    }
-}
 
 // see also the lookup_tests.rs in integration-tests crate
 #[cfg(test)]
