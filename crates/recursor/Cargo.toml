@@ -32,10 +32,6 @@ license.workspace = true
 [features]
 backtrace = ["dep:backtrace", "hickory-proto/backtrace", "hickory-resolver/backtrace"]
 
-dnssec-aws-lc-rs = ["hickory-proto/dnssec-aws-lc-rs", "hickory-resolver/dnssec-aws-lc-rs", "__dnssec"]
-dnssec-ring = ["hickory-proto/dnssec-ring", "hickory-resolver/dnssec-ring", "__dnssec"]
-__dnssec = []
-
 tls-aws-lc-rs = [
     "hickory-proto/tls-aws-lc-rs",
     "hickory-resolver/tls-aws-lc-rs",

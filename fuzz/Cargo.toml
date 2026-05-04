@@ -11,7 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-hickory-proto = { path = "../crates/proto", features = ["std", "dnssec-aws-lc-rs"] }
+hickory-proto = { path = "../crates/proto", features = ["std"] }
 pretty_assertions = "1.4.1"
 
 [[bin]]

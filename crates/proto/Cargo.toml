@@ -59,9 +59,6 @@ __h3 = ["dep:h3", "dep:h3-quinn", "dep:http", "std"]
 
 rustls-platform-verifier = ["dep:rustls-platform-verifier", "std"]
 
-dnssec-aws-lc-rs = ["dep:aws-lc-rs", "aws-lc-rs/aws-lc-sys", "aws-lc-rs/ring-io", "__dnssec"]
-dnssec-ring = ["dep:ring", "__dnssec"]
-__dnssec = ["dep:bitflags", "dep:rustls-pki-types", "dep:time", "std"]
 testing = ["std"]
 
 text-parsing = ["std"]

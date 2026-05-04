@@ -369,7 +369,6 @@ impl DnssecPolicyConfig {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(feature = "__dnssec", feature = "toml"))]
     use super::*;
 
     #[cfg(all(feature = "__dnssec", feature = "toml"))]

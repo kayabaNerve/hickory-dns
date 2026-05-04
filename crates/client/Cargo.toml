@@ -45,10 +45,6 @@ h3-ring = ["hickory-proto/h3-ring"]
 webpki-roots = ["hickory-proto/webpki-roots"]
 rustls-platform-verifier = ["hickory-proto/rustls-platform-verifier"]
 
-dnssec-aws-lc-rs = ["hickory-proto/dnssec-aws-lc-rs", "__dnssec"]
-dnssec-ring = ["hickory-proto/dnssec-ring", "__dnssec"]
-__dnssec = []
-
 serde = ["dep:serde", "hickory-proto/serde"]
 
 # enables experimental the mDNS (multicast) feature
